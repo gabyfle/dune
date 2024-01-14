@@ -17,13 +17,14 @@ module File = struct
     { path : Path.t
     ; name : string
     ; content : string
+    ; append : bool
     }
 
   type t =
     | Dune of dune
     | Text of text
 
-  let make_text path name content = Text { path; name; content }
+  let make_text ?(append = false) path name content = Text { path; name; content; append }
 
   let full_path = function
     | Dune { path; name; _ } | Text { path; name; _ } -> Path.relative path name
@@ -161,9 +162,9 @@ module File = struct
     match f with
     | Dune f -> Ok (write_dune_file f)
     | Text f ->
-      if Path.exists path
+      if Path.exists path && not f.append
       then Error path
-      else Ok (Io.write_file ~binary:false path f.content)
+      else Ok (Io.write_file ~binary:false ~append:f.append path f.content)
   ;;
 end
 
@@ -553,7 +554,7 @@ module Component = struct
             Path.is_directory Path.(append_local dir (Local.of_string path))
           in
           let git_ignore_file () =
-            File.make_text ~dir ".gitignore" "_build/\n"
+            File.make_text ~append:true dir ".gitignore" "_build/\n"
           in
           if List.exists ~f:vcs_subdirectory_exists [ ".git"; ".jj" ]
           then [ git_ignore_file () ]
@@ -569,11 +570,11 @@ module Component = struct
                            boringfile .boring`."
                    ])
             in
-            [ File.make_text ~dir ".boring" "(^|/)_build($|/)\n" ])
+            [ File.make_text ~append:true dir ".boring" "(^|/)_build($|/)\n" ])
           else if vcs_subdirectory_exists ".hg"
-          then [ File.make_text ~dir ".hgignore" "_build/$\n" ]
+          then [ File.make_text ~append:true dir ".hgignore" "_build/$\n" ]
           else if vcs_subdirectory_exists ".pijul"
-          then [ File.make_text ~dir ".ignore" "_build/\n" ]
+          then [ File.make_text ~append:true dir ".ignore" "_build/\n" ]
           else if vcs_subdirectory_exists ".fossil"
           then [] (* Fossil has no local ignore *)
           else [ git_ignore_file () ]
