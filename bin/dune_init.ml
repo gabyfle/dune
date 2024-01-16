@@ -17,13 +17,14 @@ module File = struct
     { path : Path.t
     ; name : string
     ; content : string
+    ; append : bool
     }
 
   type t =
     | Dune of dune
     | Text of text
 
-  let make_text path name content = Text { path; name; content }
+  let make_text ?(append = false) path name content = Text { path; name; content; append }
 
   let full_path = function
     | Dune { path; name; _ } | Text { path; name; _ } -> Path.relative path name
@@ -161,9 +162,9 @@ module File = struct
     match f with
     | Dune f -> Ok (write_dune_file f)
     | Text f ->
-      if Path.exists path
+      if Path.exists path && not f.append
       then Error path
-      else Ok (Io.write_file ~binary:false path f.content)
+      else Ok (Io.write_file ~binary:false ~append:f.append path f.content)
   ;;
 end
 
@@ -519,43 +520,69 @@ module Component = struct
             [ File.make_text (Path.parent_exn opam_file) (Path.basename opam_file) "" ]
           | Esy -> [ File.make_text dir "package.json" "" ]
         in
-        let default_files =
-          let fmt_version =
-            try
-              let ic = Unix.open_process_in "ocamlformat --version" in
-              let version = input_line ic in
-              let _ = Unix.close_process_in ic in
-              (let open Pp.O in
-              Console.print_user_message
-                (User_message.make
-                   [ Pp.tag User_message.Style.Hint (Pp.verbatim "Format")
-                     ++ Pp.textf ": using ocamlversion number %s" version
-                   ]));
-              version
-            with
-            | _ ->
-              (let open Pp.O in
-              Console.print_user_message
-                (User_message.make
-                   [ Pp.tag User_message.Style.Warning (Pp.verbatim "Format")
-                     ++ Pp.textf ": couldn't get the ocamlformat version number."
-                   ]);
-              Console.print_user_message
-                (User_message.make
-                   [ Pp.tag User_message.Style.Hint (Pp.verbatim "Format")
-                     ++ Pp.textf ": Are you sure you have ocamlformat installed ?"
-                   ]));
-              ""
-          in
-          (* get the current ocamlversion *)
-          [ File.make_text
-              dir
-              ".ocamlformat"
-              (if fmt_version = "" then "" else "version = \"" ^ fmt_version ^ "\"\n")
-          ; File.make_text dir ".gitignore" "_build/"
-          ]
+        let formatter_conf =
+          try
+            let ic = Unix.open_process_in "ocamlformat --version" in
+            let version = input_line ic in
+            let _ = Unix.close_process_in ic in
+            (let open Pp.O in
+             Console.print_user_message
+               (User_message.make
+                  [ Pp.tag User_message.Style.Hint (Pp.verbatim "Format")
+                    ++ Pp.textf ": using ocamlversion number %s" version
+                  ]));
+            [ File.make_text dir ".ocamlformat" ("version = \"" ^ version ^ "\"\n") ]
+          with
+          | _ ->
+            (let open Pp.O in
+             Console.print_user_message
+               (User_message.make
+                  [ Pp.tag User_message.Style.Warning (Pp.verbatim "Format")
+                    ++ Pp.textf ": couldn't get the ocamlformat version number."
+                  ]);
+             Console.print_user_message
+               (User_message.make
+                  [ Pp.tag User_message.Style.Hint (Pp.verbatim "Format")
+                    ++ Pp.textf
+                         ": Are you sure you have ocamlformat installed? If using a \
+                          different formatter, feel free to ignore."
+                  ]));
+            []
         in
-        { dir; files = (dune_project_file dir opts :: package_files) @ default_files }
+        let ignore_file =
+          let vcs_subdirectory_exists path =
+            Path.is_directory Path.(append_local dir (Local.of_string path))
+          in
+          let git_ignore_file () =
+            File.make_text ~append:true dir ".gitignore" "_build/\n"
+          in
+          if List.exists ~f:vcs_subdirectory_exists [ ".git"; ".jj" ]
+          then [ git_ignore_file () ]
+          else if vcs_subdirectory_exists "_darcs"
+          then (
+            let _ =
+              let open Pp.O in
+              Console.print_user_message
+                (User_message.make
+                   [ Pp.tag User_message.Style.Hint (Pp.verbatim "Darcs")
+                     ++ Pp.textf
+                          ": You may need to set your boringfile via `darcs setpref \
+                           boringfile .boring`."
+                   ])
+            in
+            [ File.make_text ~append:true dir ".boring" "(^|/)_build($|/)\n" ])
+          else if vcs_subdirectory_exists ".hg"
+          then [ File.make_text ~append:true dir ".hgignore" "_build/$\n" ]
+          else if vcs_subdirectory_exists ".pijul"
+          then [ File.make_text ~append:true dir ".ignore" "_build/\n" ]
+          else if vcs_subdirectory_exists ".fossil"
+          then [] (* Fossil has no local ignore *)
+          else [ git_ignore_file () ]
+        in
+        { dir
+        ; files =
+            (dune_project_file dir opts :: package_files) @ ignore_file @ formatter_conf
+        }
       in
       let component_targets =
         match (template : Options.Project.Template.t) with
